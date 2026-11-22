@@ -1,14 +1,19 @@
 import io
+import json
 import time
 from pathlib import Path
 
+import pytest
+
 from antigravity_swap import paths, views
-from antigravity_swap.cli import main, translate_legacy
+from antigravity_swap.cli import main, print_table, translate_legacy
 from antigravity_swap.manager import default_account_at, record_switch
 from antigravity_swap.processes import Instance
 from antigravity_swap.store import Registry
+from antigravity_swap.usage import normalize, normalize_models
 
 from test_core import add_accounts, put_usage, reading
+from test_usage import MODEL_QUOTA, SUMMARY_3P
 
 
 def test_legacy_flags():
@@ -44,6 +49,44 @@ def test_tree_marks_active_and_shows_both_pools(env, monkeypatch):
     for label in ("Gemini 5h:", "Gemini 7d:", "Claude/GPT 5h:", "Claude/GPT 7d:"):
         assert label in text
     assert "full" in text and "resets" in text and " in " in text
+
+
+@pytest.mark.parametrize("args", [["list", "--cached"], ["status"]])
+def test_missing_gemini_is_explicit(env, monkeypatch, capsys, args):
+    monkeypatch.setenv("NO_COLOR", "1")
+    add_accounts(env, "a@x.io")
+    put_usage(1, {"ts": time.time(), "groups": normalize(SUMMARY_3P)})
+    assert main(args) == 0
+    text = capsys.readouterr().out
+    assert "Gemini:" in text and "unavailable (quota not reported)" in text
+    assert "Claude/GPT 5h:" in text
+    assert "Gemini 5h:" not in text
+
+
+def test_model_quota_tree_table_and_json(env, monkeypatch, capsys):
+    monkeypatch.setenv("NO_COLOR", "1")
+    mgr, reg = add_accounts(env, "a@x.io")
+    put_usage(1, {"ts": time.time(), "groups": normalize(SUMMARY_3P) + normalize_models(MODEL_QUOTA)})
+    assert main(["list", "--cached"]) == 0
+    text = capsys.readouterr().out
+    assert "gemini-2.5-pro:" in text and "100%" in text and "resets" in text
+    assert "gemini-3-flash:" in text and "25%" in text
+    assert "Claude/GPT 7d:" in text and "50%" in text
+    assert "Gemini 5h:" not in text and "Gemini 7d:" not in text
+    assert "unavailable" not in text
+
+    out = io.StringIO()
+    print_table(mgr, reg, mgr.active(reg), out)
+    text = out.getvalue()
+    assert "Gemini models" in text and "100%" in text and "most-used model" in text
+
+    assert main(["list", "--cached", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    quotas = data["accounts"][0]["usage"]
+    assert quotas["gemini-model:gemini-2.5-pro"]["usedPct"] == 100
+    assert quotas["gemini-model:gemini-3-flash"]["usedPct"] == 25
+    assert quotas["3p-weekly"]["usedPct"] == 50
+    assert "gemini-5h" not in quotas and "gemini-weekly" not in quotas
 
 
 def test_switch_log_attribution(env):

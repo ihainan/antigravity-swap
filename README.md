@@ -100,6 +100,8 @@ Running instances:
 
 Numbers are **used** percent per window, with when each window resets. agy meters two pools separately: the Gemini models, and Claude and GPT models through agy. `full` means nothing is used yet. `(active)` marks the account plain `agy` uses now. `aswap list --refresh` forces fresh readings, `--cached` skips the network, and `--table` prints one compact row per account.
 
+Some accounts only receive Claude/GPT windows from `retrieveUserQuotaSummary`. For these accounts, aswap also queries `retrieveUserQuota` and shows Gemini usage and reset times by model (for example, `gemini-2.5-pro`), without assigning a five-hour or weekly window. The table's `Gemini models` column shows the most-used model; JSON exposes these readings under `gemini-model:<modelId>` keys. If neither endpoint reports Gemini quota, the account tree explicitly shows `Gemini: unavailable (quota not reported)` instead of silently hiding it. Missing readings are never treated as zero usage.
+
 **Running instances** lists every agy session on the machine, grouped by working directory, with the account it runs on: a session in an aswap directory by its slot, one started with `--gemini_dir` by the login in that directory, and one on the default login by whichever account was active when it started. A session that started before the first switch aswap recorded shows as "account unknown".
 
 Readings come from the same endpoint the agy CLI uses. When an account's access token has expired, aswap renews it by running `agy models`, which lists models and spends no quota.

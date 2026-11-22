@@ -21,7 +21,7 @@ from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.settings import KEYS, PICK_STRATEGIES, POOLS, STRATEGIES, Settings
 from antigravity_swap.settings import strategy as strategy_name
 from antigravity_swap.store import Registry, StoreError, capture, load_cred, save_cred
-from antigravity_swap.usage import WINDOW_ORDER, windows
+from antigravity_swap.usage import MODEL_PREFIX, WINDOW_ORDER, windows
 
 SCHEMA = 1
 
@@ -112,7 +112,7 @@ def print_table(mgr: Manager, reg: Registry, active, out=sys.stdout) -> None:
     if not reg.accounts:
         out.write("No accounts yet. Sign in with agy, then run: aswap add\n")
         return
-    heads = ["", "#", "account", "5h", "week", "3p 5h", "3p wk", "5h resets", "checked", ""]
+    heads = ["", "#", "account", "5h", "week", "3p 5h", "3p wk", "Gemini models", "5h resets", "checked", ""]
     rows = []
     for a in reg.ordered():
         rec = mgr.cached(a)
@@ -121,6 +121,8 @@ def print_table(mgr: Manager, reg: Registry, active, out=sys.stdout) -> None:
                  a.label + (f" ({a.alias})" if a.alias else "")]
         for b in WINDOW_ORDER:
             cells.append(f"{w[b]['used']:.0f}%" if b in w else "-")
+        model_used = [v["used"] for b, v in w.items() if b.startswith(MODEL_PREFIX)]
+        cells.append(f"{max(model_used):.0f}%" if model_used else "-")
         cells.append(fmt_when((w.get("gemini-5h") or {}).get("resets_at"), now))
         status = rec.get("status")
         age = fmt_age(mgr.usage_age(a))
@@ -133,6 +135,7 @@ def print_table(mgr: Manager, reg: Registry, active, out=sys.stdout) -> None:
     for r in [heads] + rows:
         out.write("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip() + "\n")
     out.write("\nused % per window. 5h/week: Gemini models. 3p: Claude and GPT models through agy.\n")
+    out.write("Gemini models: most-used model when window quotas are absent; - means quota not reported.\n")
     if active is None:
         cred = mgr.current_login()
         if cred is not None:

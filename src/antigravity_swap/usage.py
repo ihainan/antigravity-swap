@@ -1,8 +1,10 @@
-"""Quota readings, from the same two RPCs the Antigravity CLI uses.
+"""Quota readings, from the same RPCs the Antigravity CLI uses.
 
     POST /v1internal:loadCodeAssist            -> {cloudaicompanionProject}
     POST /v1internal:retrieveUserQuotaSummary  -> {groups: [{displayName, buckets: [
            {bucketId, window, remainingFraction, resetTime}]}]}
+    POST /v1internal:retrieveUserQuota         -> {buckets: [
+           {modelId, remainingFraction, resetTime}]}
 
 Buckets seen so far: ``gemini-5h`` and ``gemini-weekly`` (Gemini models), ``3p-5h`` and
 ``3p-weekly`` (Claude and GPT models through agy). agy reports what is *left*; aswap shows
@@ -25,6 +27,7 @@ from antigravity_swap.credentials import parse_rfc3339
 HOSTS = ("daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com")
 TIMEOUT = 15
 WINDOW_ORDER = ("gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly")
+MODEL_PREFIX = "gemini-model:"
 
 
 class UsageError(Exception):
@@ -61,7 +64,16 @@ def fetch(token: str, project: str | None = None) -> dict:
                     last = UsageError("empty", f"{host}: no project in loadCodeAssist")
                     break
                 resp = _call(host, "/v1internal:retrieveUserQuotaSummary", {"project": proj}, token)
-                return {"ts": time.time(), "project": proj, "host": host, "groups": normalize(resp)}
+                groups = normalize(resp)
+                if not any(b["bucket_id"].startswith("gemini-") for g in groups for b in g["buckets"]):
+                    # Some accounts only have 3p windows in the summary. Their Gemini
+                    # quota is per model; do not invent a 5h or weekly window for it.
+                    try:
+                        models = _call(host, "/v1internal:retrieveUserQuota", {"project": proj}, token)
+                        groups.extend(normalize_models(models))
+                    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                        pass  # keep the successful summary if this optional RPC fails
+                return {"ts": time.time(), "project": proj, "host": host, "groups": groups}
             except urllib.error.HTTPError as e:
                 if e.code == 401:
                     raise UsageError("auth", "access token rejected (401)") from None
@@ -92,6 +104,22 @@ def normalize(resp: dict) -> list[dict]:
         if buckets:
             groups.append({"display_name": g.get("displayName") or "", "buckets": buckets})
     return groups
+
+
+def normalize_models(resp: dict) -> list[dict]:
+    """Gemini model quotas, kept separate from the summary's time windows."""
+    buckets = []
+    for b in resp.get("buckets") or []:
+        model = b.get("modelId") or ""
+        if not model.startswith("gemini-") or b.get("disabled") or b.get("remainingFraction") is None:
+            continue
+        buckets.append({
+            "bucket_id": MODEL_PREFIX + model,
+            "window": "model",
+            "remaining_fraction": float(b["remainingFraction"]),
+            "reset_time": b.get("resetTime") or "",
+        })
+    return [{"display_name": "Gemini models (per model)", "buckets": buckets}] if buckets else []
 
 
 def windows(reading: dict | None) -> dict[str, dict]:

@@ -11,7 +11,7 @@ from antigravity_swap.credentials import CredentialError, FileBackend
 from antigravity_swap.manager import Manager, default_account_at
 from antigravity_swap.processes import Instance, list_instances
 from antigravity_swap.store import Account, Registry
-from antigravity_swap.usage import WINDOW_ORDER, windows
+from antigravity_swap.usage import MODEL_PREFIX, WINDOW_ORDER, windows
 
 LABELS = {
     "gemini-5h": "Gemini 5h",
@@ -95,16 +95,26 @@ def print_tree(mgr: Manager, reg: Registry, active: Account | None, out: TextIO,
         is_active = bool(active and active.slot == a.slot)
         name = style.active(account_name(a)) if is_active else account_name(a)
         out.write("  " + " ".join([f"{a.slot}: {name}"] + _header_bits(mgr, a, is_active, now)) + "\n")
-        w = windows(mgr.cached(a).get("reading"))
+        reading = mgr.cached(a).get("reading")
+        w = windows(reading)
         rows = [b for b in WINDOW_ORDER if b in w]
+        rows.extend(sorted(b for b in w if b.startswith(MODEL_PREFIX)))
+        missing_gemini = bool(reading) and not any(b.startswith("gemini-") for b in w)
+        if missing_gemini:
+            rows.insert(0, "gemini-unavailable")
         if not rows:
             out.write(f"     {style.dim(g['end'])} {style.dim(f'no quota reading yet (aswap refresh {a.slot})')}\n")
             continue
-        width = max(len(LABELS[b]) for b in rows) + 1
+        labels = {b: LABELS.get(b, b.removeprefix(MODEL_PREFIX)) for b in rows}
+        labels["gemini-unavailable"] = "Gemini"
+        width = max(len(labels[b]) for b in rows) + 1
         for i, b in enumerate(rows):
             tree = style.dim(g["end"] if i == len(rows) - 1 else g["mid"])
+            label = (labels[b] + ":").ljust(width)
+            if b == "gemini-unavailable":
+                out.write(f"     {tree} {label} {style.dim('unavailable (quota not reported)')}\n")
+                continue
             used, resets = w[b]["used"], w[b]["resets_at"]
-            label = (LABELS[b] + ":").ljust(width)
             if used <= 0:
                 tail = style.dim("full")
             else:
