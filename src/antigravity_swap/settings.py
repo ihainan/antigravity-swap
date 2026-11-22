@@ -56,7 +56,8 @@ KEYS: dict[str, Key] = {k.name: k for k in [
     Key("failover.strategy", "best", str,
         "How run and exec pick the next account: best (most-quota), rotate (round-robin), "
         "next-available, consume-first (soonest-reset).", choices=PICK_STRATEGIES),
-    Key("failover.max_hops", 0, int, "Most account changes in one run; 0 means every account once.",
+    Key("failover.max_hops", 0, int,
+        "Most account changes; 0 means unlimited for run, every account once for exec.",
         lambda v: v >= 0),
     Key("failover.resume_prompt",
         "Please continue where you left off.",

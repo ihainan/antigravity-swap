@@ -1,4 +1,5 @@
 import io
+import threading
 import time
 
 from antigravity_swap.settings import Settings
@@ -44,6 +45,108 @@ def test_session_moves_to_next_account_and_continues(env, capfd):
     a = Registry.load().get(1)
     assert a.is_limited() and abs(a.limited_until - (time.time() + 1800)) < 60
     assert "held out until" in err and "continuing conversation" in err
+
+
+def test_session_reuses_recovered_accounts_beyond_one_round(env, monkeypatch, capfd):
+    from antigravity_swap import supervise
+
+    env.plan({"a@x.io": "quota", "b@x.io": "quota"})
+    add_accounts(env, "a@x.io", "b@x.io")
+    real_flag, real_next, real_popen = supervise._flag, supervise._next, supervise.subprocess.Popen
+    procs, checks = [], []
+
+    def popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        procs.append(proc)
+        return proc
+
+    def recovered(slot, limited=None, quarantine=None):
+        # Quota windows elapse between hops in a long-running real conversation.
+        real_flag(slot, limited=(time.time() - 1, limited[1]))
+
+    def next_account(mgr, strategy, pool, excluded, after):
+        checks.append(after)
+        assert excluded == {after}  # an earlier account must not be excluded forever
+        if len(checks) == 3:
+            env.plan({"a@x.io": "quota", "b@x.io": "ok"})
+        return real_next(mgr, strategy, pool, excluded, after)
+
+    monkeypatch.setattr(supervise.subprocess, "Popen", popen)
+    monkeypatch.setattr(supervise, "_flag", recovered)
+    monkeypatch.setattr(supervise, "_next", next_account)
+    watchdog = threading.Timer(10, lambda: [p.kill() for p in procs if p.poll() is None])
+    watchdog.start()
+    try:
+        rc, err = run(env, [], target="1", strategy="rotate")
+        assert rc == 0, err
+        assert checks == [1, 2, 1]  # 1 -> 2 -> recovered 1 -> recovered 2
+        assert "turns=4" in capfd.readouterr().out
+        assert err.count("continuing conversation") == 3
+    finally:
+        watchdog.cancel()
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
+def test_waits_and_retries_when_another_account_recovers(env, monkeypatch, capfd):
+    from antigravity_swap import supervise
+
+    env.plan({"a@x.io": "quota", "b@x.io": "ok"})
+    add_accounts(env, "a@x.io", "b@x.io")
+    real_next = supervise._next
+    checks = []
+
+    def next_account(*args):
+        checks.append(time.monotonic())
+        return None if len(checks) == 1 else real_next(*args)
+
+    monkeypatch.setattr(supervise, "_next", next_account)
+    rc, err = run(env, [], target="1", strategy="rotate", retry_interval=0.05)
+    assert rc == 0, err
+    assert len(checks) == 2  # only one quota error was logged by the first process
+    assert "checking again every" in err
+    assert "turns=2" in capfd.readouterr().out
+
+
+def test_explicit_hop_limit_is_still_enforced(env, monkeypatch, capfd):
+    from antigravity_swap import supervise
+
+    env.plan({"a@x.io": "quota", "b@x.io": "quota", "c@x.io": "ok"})
+    add_accounts(env, "a@x.io", "b@x.io", "c@x.io")
+    mgr = env.manager()
+    mgr.settings = Settings({"failover.max_hops": 1})
+    real_popen = supervise.subprocess.Popen
+    procs = []
+
+    def popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(supervise.subprocess, "Popen", popen)
+    err = io.StringIO()
+    watchdog = threading.Timer(4, lambda: [p.kill() for p in procs if p.poll() is None])
+    watchdog.start()
+    try:
+        run_interactive(mgr, [], target="1", strategy="rotate", err=err, grace=0)
+        assert len(procs) == 2  # account 3 was available but the explicit cap stopped hopping
+        assert "failover.max_hops (1) reached" in err.getvalue()
+    finally:
+        watchdog.cancel()
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
+def test_log_watch_distinguishes_a_new_turn_from_a_failed_turn(tmp_path):
+    watch = LogWatch(tmp_path / "x.log")
+    watch.feed("agent executor error: Individual quota reached. Resets in 1h\n")
+    assert watch.quota_turn == watch.turn
+    watch.feed("Sending user message to conversation 7d5d4ba2-f44e-4762-9dfe-33bd01518022\n")
+    assert watch.quota_turn != watch.turn
 
 
 def test_stays_put_when_no_account_is_free(env, monkeypatch, capfd):

@@ -42,16 +42,21 @@ class LogWatch(threading.Thread):
         self.from_end = from_end
         self.conv: str | None = None
         self.quota_line: str | None = None
+        self.turn = 0
+        self.quota_turn = 0
         self.hit = threading.Event()
         self.done = threading.Event()
 
     def feed(self, line: str) -> None:
+        if "Sending user message to conversation" in line:
+            self.turn += 1
         if "onversation" in line:
             m = UUID_RE.search(line)
             if m and (self.conv is None or "Created conversation" in line or "esum" in line):
                 self.conv = m.group(0)
         if FINAL_QUOTA_RE.search(line):
             self.quota_line = line
+            self.quota_turn = self.turn
             self.hit.set()
 
     def run(self) -> None:
@@ -134,7 +139,7 @@ def restore_terminal() -> None:
 
 def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None,
                     strategy: str | None = None, share_history: bool = False,
-                    err: TextIO = sys.stderr, grace: float = 1.5) -> int:
+                    err: TextIO = sys.stderr, grace: float = 1.5, retry_interval: float = 60.0) -> int:
     if _flag_value(agy_args, ("--gemini_dir",))[0] >= 0:
         raise ExecError("do not pass --gemini_dir; aswap picks the directory for each account")
     if _flag_value(agy_args, PROMPT_FLAGS)[0] >= 0:
@@ -163,15 +168,13 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
     acct, default_acct = with_registry(first)
     if acct is None:
         return _exhausted(say)
-    max_hops = int(mgr.settings.get("failover.max_hops")) or len(Registry.load().accounts)
-    tried: set[int] = set()
+    max_hops = int(mgr.settings.get("failover.max_hops"))
     hops = 0
     conv: str | None = None
     prev_dir: Path | None = None
     run_args = list(agy_args)
 
     while True:
-        tried.add(acct.slot)
         if mgr.isolates:
             on_default = default_acct is not None and acct.slot == default_acct.slot and not share_history
             gdir = mgr.gdir if on_default else agy.prepare_session(
@@ -194,6 +197,10 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
         watch.start()
         started = time.time()
         nxt = None
+        pending_quota = False
+        pending_turn = 0
+        next_check = 0.0
+        announced_wait = False
         prev_int = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C belongs to agy
         try:
             proc = subprocess.Popen(cmd0 + agy.dir_args(gdir) + launch)
@@ -203,18 +210,37 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
                     break
                 except subprocess.TimeoutExpired:
                     pass
-                if not watch.hit.is_set():
+                if watch.hit.is_set():
+                    watch.hit.clear()
+                    secs = agy.parse_reset(watch.quota_line or "")
+                    until = time.time() + (secs or fallback)
+                    _flag(acct.slot, limited=(until, "quota: Individual quota reached" if secs else "quota error"))
+                    pending_quota = True
+                    pending_turn = watch.quota_turn
+                    next_check = 0.0
+                if pending_quota and watch.turn != pending_turn:
+                    pending_quota = False  # the user has already started another turn
+                if not pending_quota or time.monotonic() < next_check:
                     continue
-                watch.hit.clear()
-                secs = agy.parse_reset(watch.quota_line or "")
-                until = time.time() + (secs or fallback)
-                _flag(acct.slot, limited=(until, "quota: Individual quota reached" if secs else "quota error"))
-                nxt = _next(mgr, strategy, pool, tried, acct.slot)
-                if nxt is None or hops + 1 > max_hops:
-                    say(f"account {acct.slot} hit its quota and no other account is free; staying on it")
-                    nxt = None
+                if max_hops and hops >= max_hops:
+                    say(f"account {acct.slot} hit its quota; failover.max_hops ({max_hops}) reached; staying on it")
+                    pending_quota = False
+                    continue
+                # A long-running TUI can outlive quota windows. Previously used accounts
+                # become candidates again once their hold expires and quota recovers.
+                nxt = _next(mgr, strategy, pool, {acct.slot}, acct.slot)
+                if nxt is None:
+                    if not announced_wait:
+                        say(f"account {acct.slot} hit its quota and no other account is free; "
+                            f"staying on it and checking again every {retry_interval:g}s")
+                        announced_wait = True
+                    next_check = time.monotonic() + retry_interval
                     continue
                 time.sleep(grace)  # let the error show before the screen changes
+                if watch.turn != pending_turn:
+                    pending_quota = False
+                    nxt = None
+                    continue
                 stop(proc)
                 rc = None
                 break

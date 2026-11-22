@@ -176,6 +176,8 @@ When the account hits its quota mid-session, aswap:
 
 The conversation is a local file, so the next account has the whole history and picks up the task. You see agy restart in the same terminal and carry on. If no other account is free, aswap leaves the session alone and tells you.
 
+Interactive runs can return to an account used earlier once its quota hold expires and its quota recovers. If all other accounts are temporarily unavailable, aswap checks again every 60 seconds while the TUI remains open. By default there is no lifetime switch limit for interactive runs; set `failover.max_hops` to a positive value to cap account changes. Print-mode `exec` still tries each account at most once when this setting is zero.
+
 **Why a restart, and not a swap under the running session like claude-swap?** Claude Code re-reads its credentials file, so claude-swap can change account in place. agy keeps its login in memory for the life of the process; replacing the file under a running agy does nothing (tested). Restarting on the same conversation is the closest equivalent.
 
 aswap watches agy's log for the final quota error. agy retries a quota error a couple of times first ("attempt 1 failed ... retrying"), and those retries never trigger a switch. Only the error that ends the turn does.
@@ -301,7 +303,7 @@ aswap config path
 | `switch.verify` | `true` | prove each new login with `agy models` |
 | `run.failover` | `true` | `aswap run` restarts on the next account when one runs out |
 | `failover.strategy` | `best` | how `run` and `exec` pick the next account (see Strategies) |
-| `failover.max_hops` | `0` | most account changes per run; `0` is every account once |
+| `failover.max_hops` | `0` | most account changes; `0` is unlimited for interactive `run`, every account once for `exec` |
 | `failover.resume_prompt` | `Please continue where you left off.` | sent when a conversation moves to the next account |
 | `failover.limit_fallback_hours` | `5` | hold time when a quota error names no reset |
 | `usage.max_age_seconds` | `300` | readings older than this are re-fetched |
